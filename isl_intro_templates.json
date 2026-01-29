@@ -1,0 +1,43 @@
+[
+  { "english": "Hello", "gloss": ["HELLO"] },
+  { "english": "Hello, how are you?", "gloss": ["HELLO", "HOW", "YOU"] },
+  { "english": "Hi, how are you?", "gloss": ["HELLO", "HOW", "YOU"] },
+
+  { "english": "What is your name?", "gloss": ["YOUR", "NAME", "WHAT"] },
+  { "english": "What is your good name?", "gloss": ["YOUR", "NAME", "WHAT"] },
+  { "english": "What's your name?", "gloss": ["YOUR", "NAME", "WHAT"] },
+
+  { "english": "My name is Rahul", "gloss": ["ME", "NAME", "RAHUL"] },
+  { "english": "My name is Ashik", "gloss": ["ME", "NAME", "ASHIK"] },
+
+  { "english": "Where are you from?", "gloss": ["YOU", "FROM", "WHERE"] },
+  { "english": "Where do you come from?", "gloss": ["YOU", "FROM", "WHERE"] },
+
+  { "english": "Where do you live?", "gloss": ["YOU", "LIVE", "WHERE"] },
+  { "english": "Where you live?", "gloss": ["YOU", "LIVE", "WHERE"] },
+
+  { "english": "I live in Kochi", "gloss": ["ME", "LIVE", "KOCHI"] },
+  { "english": "I live in Delhi", "gloss": ["ME", "LIVE", "DELHI"] },
+
+  { "english": "How are you?", "gloss": ["HOW", "YOU"] },
+  { "english": "I am happy", "gloss": ["ME", "HAPPY"] },
+  { "english": "I am sad", "gloss": ["ME", "SAD"] },
+  { "english": "I am busy", "gloss": ["ME", "BUSY"] },
+
+  { "english": "Thank you", "gloss": ["THANK_YOU"] },
+  { "english": "Thank you very much", "gloss": ["THANK_YOU"] },
+  { "english": "Thanks", "gloss": ["THANK_YOU"] },
+
+  { "english": "Good bye", "gloss": ["BYE"] },
+  { "english": "Bye", "gloss": ["BYE"] },
+  { "english": "See you again", "gloss": ["SEE", "YOU", "AGAIN"] },
+
+  { "english": "I work", "gloss": ["ME", "WORK"] },
+  { "english": "I work from home", "gloss": ["ME", "WORK", "HOME"] },
+  { "english": "I study", "gloss": ["ME", "STUDY"] },
+  { "english": "I study in college", "gloss": ["ME", "STUDY", "COLLEGE"] },
+
+  { "english": "Welcome", "gloss": ["WELCOME"] },
+  { "english": "You are welcome", "gloss": ["YOU", "WELCOME"] }
+]
+
