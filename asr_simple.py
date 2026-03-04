@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -42,6 +43,33 @@ def _block_speech_ratio(audio_float: np.ndarray, vad: webrtcvad.Vad) -> float:
     return speech_frames / n_frames if n_frames else 0.0
 
 
+def _float_audio_to_pcm16_bytes(audio_float: np.ndarray) -> bytes:
+    audio_int16 = (np.clip(audio_float, -1.0, 1.0) * 32767).astype(np.int16)
+    return audio_int16.tobytes()
+
+
+def _google_stt_transcribe(full_audio_float: np.ndarray, language: str = "en-US") -> str:
+    """
+    Transcribe using the unofficial Google Web Speech API via SpeechRecognition.
+    Requires `pip install SpeechRecognition` and an internet connection.
+    """
+    try:
+        import speech_recognition as sr  # type: ignore[import]
+    except Exception as e:
+        raise RuntimeError(
+            "Google STT selected but SpeechRecognition is not installed. "
+            "Install it with: pip install SpeechRecognition"
+        ) from e
+
+    r = sr.Recognizer()
+    audio_bytes = _float_audio_to_pcm16_bytes(full_audio_float)
+    audio_data = sr.AudioData(audio_bytes, SAMPLE_RATE, 2)
+    try:
+        return r.recognize_google(audio_data, language=language).strip()
+    except sr.UnknownValueError:
+        return ""
+
+
 def _publisher_worker(q: "queue.Queue[dict]", webapp_url: str) -> None:
     while True:
         item = q.get()
@@ -62,17 +90,45 @@ def _publisher_worker(q: "queue.Queue[dict]", webapp_url: str) -> None:
             pass
 
 
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """
+    Keep CLI backwards-compatible with ad-hoc flags (e.g. `--mic`)
+    by parsing only the options we care about and ignoring unknowns.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--webapp-url", default=None)
+    p.add_argument("--no-publish", action="store_true", default=False)
+    p.add_argument("--stt", choices=["whisper", "google"], default="whisper")
+    p.add_argument("--language", default="en")
+    args, _unknown = p.parse_known_args(argv[1:])
+    return args
+
+
 def main():
-    print("Loading Whisper model (small, CPU, int8)…")
-    model = WhisperModel("small", device="cpu", compute_type="int8")
+    args = _parse_args(sys.argv)
+
+    model: WhisperModel | None = None
+    if args.stt == "whisper":
+        print("Loading Whisper model (small, CPU, int8)…")
+        model = WhisperModel("small", device="cpu", compute_type="int8")
+    else:
+        print("Using Google STT (SpeechRecognition / recognize_google)…")
+
     vad = webrtcvad.Vad(2)  # 0=quality, 3=aggressive; 2 is a middle ground
 
-    webapp_url = os.getenv("WEBAPP_URL", "http://127.0.0.1:8001")
-    pub_q: "queue.Queue[dict]" = queue.Queue(maxsize=5)
-    pub_thread = threading.Thread(
-        target=_publisher_worker, args=(pub_q, webapp_url), daemon=True
-    )
-    pub_thread.start()
+    webapp_url = args.webapp_url or os.getenv("WEBAPP_URL", "http://127.0.0.1:8000")
+    publish_enabled = not args.no_publish
+
+    pub_q: "queue.Queue[dict] | None" = None
+    if publish_enabled:
+        pub_q = queue.Queue(maxsize=5)
+        pub_thread = threading.Thread(
+            target=_publisher_worker, args=(pub_q, webapp_url), daemon=True
+        )
+        pub_thread.start()
+        print(f"Publishing ASR events to {webapp_url.rstrip('/')}/api/publish")
+    else:
+        print("Publishing disabled (--no-publish).")
 
     buffer: list[np.ndarray] = []
     silence_blocks = 0
@@ -104,30 +160,42 @@ def main():
                     buffer.clear()
                     silence_blocks = 0
 
-                    segments, _ = model.transcribe(
-                        full_audio,
-                        language="en",
-                        beam_size=5,
-                        vad_filter=True,
-                    )
-                    texts = [seg.text.strip() for seg in segments if seg.text.strip()]
-                    if not texts:
+                    transcript = ""
+                    if args.stt == "whisper":
+                        assert model is not None
+                        segments, _ = model.transcribe(
+                            full_audio,
+                            language=args.language,
+                            beam_size=5,
+                            vad_filter=True,
+                        )
+                        texts = [seg.text.strip() for seg in segments if seg.text.strip()]
+                        transcript = " ".join(texts).strip()
+                    else:
+                        # Google expects locale codes like en-US; map minimal cases.
+                        google_lang = (
+                            "en-US" if args.language.lower().startswith("en") else args.language
+                        )
+                        transcript = _google_stt_transcribe(full_audio, language=google_lang)
+
+                    if not transcript:
                         return
-                    transcript = " ".join(texts)
+
                     print("> ASR :", transcript)
                     gloss_result = english_to_isl_gloss(transcript)
                     print("  GLOSS (ISL rules):", " ".join(gloss_result.gloss_tokens))
 
                     # Publish to the web app (so it can auto-play videos)
-                    try:
-                        pub_q.put_nowait(
-                            {
-                                "transcript": transcript,
-                                "gloss_tokens": gloss_result.gloss_tokens,
-                            }
-                        )
-                    except queue.Full:
-                        pass
+                    if pub_q is not None:
+                        try:
+                            pub_q.put_nowait(
+                                {
+                                    "transcript": transcript,
+                                    "gloss_tokens": gloss_result.gloss_tokens,
+                                }
+                            )
+                        except queue.Full:
+                            pass
 
     with sd.InputStream(
         channels=1,
@@ -143,7 +211,8 @@ def main():
             print("\nStopping.")
         finally:
             try:
-                pub_q.put_nowait(None)  # type: ignore[arg-type]
+                if pub_q is not None:
+                    pub_q.put_nowait(None)  # type: ignore[arg-type]
             except Exception:
                 pass
 
