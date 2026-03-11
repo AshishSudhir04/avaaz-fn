@@ -1,0 +1,216 @@
+================================================================================
+  AVAAZ – VIDEO MAPPING – CODE EXPLAINED (BEGINNER-FRIENDLY)
+================================================================================
+
+This file explains the "video mapping" part: how the project maps ISL gloss
+tokens (e.g. HELLO, YOU, NAME) to actual video files (e.g. Hello.mp4) and
+serves those videos to the frontend. It also covers how the web app stores
+the "latest event" when the ASR publishes a new transcript and gloss, so
+the Live mode in the frontend can show and play the right videos.
+
+--------------------------------------------------------------------------------
+WHICH FILES BELONG TO VIDEO MAPPING?
+--------------------------------------------------------------------------------
+
+  • web_app.py          – Flask server. It:
+      - Loads the glossary (gloss → video filename) from isl_lexicon.json.
+      - Exposes POST /api/sequence (gloss tokens in → video URLs out).
+      - Exposes POST /api/publish (receives transcript/gloss from ASR, runs
+        glossing if needed, maps tokens to videos, stores as "latest event").
+      - Exposes GET /api/latest (returns that latest event for the frontend).
+      - Serves video files at GET /videos/<filename> from a video directory.
+
+  • isl_lexicon.json    – Data file. Each entry has at least:
+      - "gloss"  – the token name (e.g. "HELLO", "Thank You" for two-word
+                   signs; the code normalizes to uppercase when looking up).
+      - "asset"  – the video filename (e.g. "Hello.mp4", "Thank You.mp4").
+    Optional: "english" for display. The mapping that matters for playback
+    is gloss → asset.
+
+  • Video folder        – Directory that contains the .mp4 files. Default
+    in code: "INDIAN SIGN LANGUAGE ANIMATED VIDEOS " (with a trailing space).
+    Can be overridden with the environment variable ISL_VIDEO_DIR.
+
+  So: lexicon file + video folder define "which file for which gloss"; the
+  web app uses that to build URLs and serve files.
+
+--------------------------------------------------------------------------------
+WHAT VIDEO MAPPING DOES IN PLAIN ENGLISH
+--------------------------------------------------------------------------------
+
+  1. When the server starts, it reads isl_lexicon.json and builds a dictionary:
+     gloss (uppercase) → asset (filename). Example: "HELLO" → "Hello.mp4".
+
+  2. When someone sends a list of gloss tokens (e.g. ["HELLO", "HOW", "YOU"]):
+     For each token, we look up the filename. If found, we add a URL like
+     /videos/Hello.mp4 to the list (using URL encoding for spaces, e.g.
+     "Thank You.mp4" → /videos/Thank%20You.mp4). Tokens that have no entry
+     in the lexicon go into a "missing" list (so the UI can show "no video
+     for X").
+
+  3. When the ASR sends a new result via POST /api/publish, the server does
+     the same: it gets or computes gloss tokens, maps them to video URLs,
+     and stores everything (transcript, gloss_tokens, video_urls, missing)
+     as the "latest event." The frontend’s Live mode calls GET /api/latest
+     and then plays the video_urls.
+
+  4. When the browser requests /videos/Hello.mp4, the server sends the file
+     from the video directory. So "video mapping" = lexicon + logic that
+     produces URLs + serving those files.
+
+--------------------------------------------------------------------------------
+CODE WALKTHROUGH – web_app.py (VIDEO MAPPING PARTS)
+--------------------------------------------------------------------------------
+
+--- Imports and paths ---
+
+  - Flask, jsonify, request, send_from_directory for the web server.
+  - Path, os for paths; quote from urllib.parse to URL-encode filenames
+    (e.g. spaces in "Thank You.mp4").
+  - english_to_isl_gloss from nlp_gloss: used when /api/publish receives
+    only transcript (no gloss_tokens) or when /api/gloss is called.
+
+  APP_DIR = directory where web_app.py lives.
+  STATIC_DIR = APP_DIR / "web_static" (for serving index.html).
+  DEFAULT_VIDEO_DIR = APP_DIR / "INDIAN SIGN LANGUAGE ANIMATED VIDEOS ".
+  VIDEO_DIR = from env ISL_VIDEO_DIR if set, else DEFAULT_VIDEO_DIR;
+              expanded (e.g. ~) and resolved to absolute path.
+  LEXICON_PATH = APP_DIR / "isl_lexicon.json".
+
+--- load_gloss_to_asset() ---
+
+  - Reads the JSON file at LEXICON_PATH.
+  - For each object in the array, gets "gloss" and "asset". Strips and
+    uppercases gloss so "Hello" and "HELLO" both become "HELLO".
+  - Builds a dictionary: gloss → asset (e.g. "HELLO" → "Hello.mp4").
+  - Returns that dictionary. Only entries with non-empty gloss and asset
+    are included.
+
+  This is the core "which video for which gloss" map. It is computed once
+  at startup and stored in GLOSS_TO_ASSET.
+
+--- GLOSS_TO_ASSET ---
+
+  Global variable: the result of load_gloss_to_asset(). Used by /api/sequence
+  and /api/publish to turn gloss tokens into filenames.
+
+--- LATEST_EVENT ---
+
+  A global dictionary that holds the "latest" event for Live mode. Initially
+  {"id": 0}. When POST /api/publish is called, it is replaced with a new
+  object that has a new id, transcript, gloss_tokens, video_urls, missing,
+  etc. GET /api/latest just returns this object. So the server does not
+  keep history; only the last event is stored.
+
+--- GET "/" (index) ---
+
+  Sends the file index.html from STATIC_DIR. So the "frontend" is served
+  at the root URL. No video mapping here; just serving the HTML.
+
+--- GET /health ---
+
+  Returns JSON: ok, video_dir path, video_dir_exists (boolean), lexicon_entries
+  (number of gloss→asset entries). Useful to check that the server and paths
+  are correct. The frontend calls this once on load.
+
+--- POST /api/gloss ---
+
+  Receives JSON body with "text". Calls english_to_isl_gloss(text) and
+  returns result.to_dict(). This is "English → gloss" only; no video mapping.
+  The frontend uses this for the "Gloss + Play" flow, then sends the
+  gloss_tokens to /api/sequence to get videos.
+
+--- POST /api/sequence (VIDEO MAPPING) ---
+
+  This is where gloss tokens are turned into video URLs.
+
+  1. Get payload and gloss_tokens (list). If not a list, return 400 error.
+  2. Normalize tokens: strip, uppercase, skip empty.
+  3. For each token:
+       - asset = GLOSS_TO_ASSET.get(token). If no asset, append token to
+         "missing" and continue.
+       - If asset exists, append "/videos/" + quote(asset) to urls (quote
+         handles spaces and special characters in filenames).
+  4. Return JSON: { gloss_tokens, video_urls, missing }.
+
+  So the frontend (or anyone) can send ["HELLO","HOW","YOU"] and get back
+  video_urls like ["/videos/Hello.mp4", "/videos/How.mp4", "/videos/You.mp4"],
+  and missing = [] if all are in the lexicon.
+
+--- POST /api/publish (VIDEO MAPPING + LATEST EVENT) ---
+
+  This is used by the ASR script to push a new transcript and gloss to the
+  web app. The server then does gloss→video mapping and stores the result
+  as the latest event.
+
+  1. Get payload: transcript (string), gloss_tokens (list, optional).
+  2. If transcript is non-empty and gloss_tokens is empty:
+       - Call english_to_isl_gloss(transcript) to get tokens and meta.
+       - tokens = gloss_result.gloss_tokens, gloss_meta = result’s meta.
+  3. Else (we have gloss_tokens from the client, or no transcript):
+       - Use tokens from payload (strip, uppercase). gloss_meta = external.
+  4. For each token, same as /api/sequence: look up GLOSS_TO_ASSET, build
+     video_urls, collect missing.
+  5. event_id = last LATEST_EVENT["id"] + 1.
+  6. LATEST_EVENT = { id: event_id, transcript, gloss_tokens, gloss_meta,
+     video_urls, missing }.
+  7. Return this object as JSON.
+
+  So when the ASR sends {"transcript": "Hello how are you", "gloss_tokens":
+  ["HELLO","HOW","YOU"]}, the server already has tokens; it just maps them
+  to video URLs and saves. The frontend, when it polls /api/latest, gets
+  this object and can play video_urls and show transcript/gloss_tokens/missing.
+
+--- GET /api/latest ---
+
+  Returns the current LATEST_EVENT (JSON). No video mapping here; just
+  returning the stored event that already contains video_urls.
+
+--- GET /videos/<path:filename> (SERVING VIDEOS) ---
+
+  When the browser requests e.g. /videos/Hello.mp4, Flask calls
+  serve_from_directory(VIDEO_DIR, filename). So the file is read from the
+  video folder (e.g. "INDIAN SIGN LANGUAGE ANIMATED VIDEOS /Hello.mp4")
+  and sent as the response. The frontend never sees the disk path; it only
+  uses URLs like /videos/Hello.mp4 that the server generated from the
+  lexicon.
+
+--- Running the app ---
+
+  If STATIC_DIR does not exist, the app exits. Otherwise it runs Flask on
+  host 0.0.0.0 and port from env PORT (default 8000). use_reloader=False to
+  avoid extra process issues. So the same process loads the lexicon once and
+  serves both API and video files.
+
+--------------------------------------------------------------------------------
+CODE/DATA WALKTHROUGH – isl_lexicon.json
+--------------------------------------------------------------------------------
+
+  Format: JSON array of objects. Each object typically has:
+    - "english" – optional, for display (e.g. "hello", "thank you").
+    - "gloss"   – the token used in the app (e.g. "HELLO", "THANK_YOU").
+                  The app uppercases when building the map, so "Hello" and
+                  "HELLO" both work.
+    - "asset"   – the filename of the video in the video folder (e.g. "Hello.mp4",
+                  "Thank You.mp4"). Must match the actual file name; spaces
+                  are allowed and are URL-encoded when building /videos/... URLs.
+
+  Example entries:
+    { "english": "hello", "gloss": "HELLO", "asset": "Hello.mp4" }
+    { "english": "thank you", "gloss": "THANK_YOU", "asset": "Thank You.mp4" }
+
+  The web app only uses "gloss" and "asset" for mapping. If a gloss token
+  produced by the NLP (or sent by the ASR) is not in this file, it will be
+  in the "missing" list and no video URL will be generated for it.
+
+--------------------------------------------------------------------------------
+SUMMARY
+--------------------------------------------------------------------------------
+
+  Video mapping in this project = (1) isl_lexicon.json: gloss → asset
+  (filename), (2) web_app.py: at startup loads that into GLOSS_TO_ASSET,
+  (3) /api/sequence and /api/publish: turn lists of gloss tokens into
+  video_urls (and missing), (4) GET /videos/<filename>: serve the actual
+  file from VIDEO_DIR. The frontend and ASR only deal with tokens and URLs;
+  they do not need to know where the video folder is or how files are named,
+  as long as the lexicon and the folder are in sync.

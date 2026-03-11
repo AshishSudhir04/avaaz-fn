@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+Flask backend for Avaaz web demo.
+
+Responsibilities:
+- Serve frontend HTML
+- Convert English -> gloss (`/api/gloss`)
+- Map gloss tokens -> video URLs (`/api/sequence`)
+- Accept live ASR events and store latest (`/api/publish`, `/api/latest`)
+- Expose ASR control state for UI stop/start behavior
+"""
+
 import json
 import os
 from pathlib import Path
@@ -7,17 +18,17 @@ from urllib.parse import quote
 
 from flask import Flask, jsonify, request, send_from_directory  # type: ignore[import]
 
-from nlp_gloss import english_to_isl_gloss
+from nlp.nlp_gloss import english_to_isl_gloss_hybrid
 
 
-APP_DIR = Path(__file__).resolve().parent
-STATIC_DIR = APP_DIR / "web_static"
+APP_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = APP_DIR / "web" / "web_static"
 
-# Default: use the dataset folder inside this repo
+# Default: use the dataset folder inside the repo root
 DEFAULT_VIDEO_DIR = APP_DIR / "INDIAN SIGN LANGUAGE ANIMATED VIDEOS "
 VIDEO_DIR = Path(os.getenv("ISL_VIDEO_DIR", str(DEFAULT_VIDEO_DIR))).expanduser().resolve()
 
-LEXICON_PATH = APP_DIR / "isl_lexicon.json"
+LEXICON_PATH = APP_DIR / "nlp" / "isl_lexicon.json"
 
 
 def load_gloss_to_asset() -> dict[str, str]:
@@ -37,6 +48,61 @@ app = Flask(__name__)
 
 # In-memory “latest event” store for Live mode
 LATEST_EVENT: dict[str, object] = {"id": 0}
+
+# Simple ASR control flag so the UI can ask the ASR process to stop.
+ASR_CONTROL: dict[str, str] = {"state": "running"}  # "running" or "stopped"
+
+
+def _expand_tokens_with_fingerspelling(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Expand gloss tokens so unknown alphabetic tokens are replaced by letters.
+
+    Example:
+      ["SO", "MY", "NAME", "ASHIK"] ->
+        expanded_tokens: ["SO","MY","NAME","A","S","H","I","K"]
+        missing: []   (assuming A..Z exist in the lexicon)
+
+    Unknown non-alphabetic tokens are reported in missing but not expanded.
+    """
+    expanded: list[str] = []
+    missing: list[str] = []
+
+    for tok in tokens:
+        t = tok.strip().upper()
+        if not t:
+            continue
+
+        if t in GLOSS_TO_ASSET:
+            expanded.append(t)
+            continue
+
+        if t.isalpha() and len(t) > 1:
+            # Fingerspell as letters, but only if all letters exist.
+            letters_ok = True
+            for ch in t:
+                if ch not in GLOSS_TO_ASSET:
+                    letters_ok = False
+                    break
+            if letters_ok:
+                expanded.extend(list(t))
+                continue
+
+        # At this point we don't know how to realize this token.
+        missing.append(t)
+
+    return expanded, missing
+
+
+def _tokens_to_video_urls(tokens: list[str]) -> list[str]:
+    """Convert gloss tokens to served video URLs using the loaded lexicon."""
+    urls: list[str] = []
+    for token in tokens:
+        asset = GLOSS_TO_ASSET.get(token)
+        if not asset:
+            continue
+        # URL-encode filenames (handles spaces like "Thank You.mp4")
+        urls.append(f"/videos/{quote(asset)}")
+    return urls
 
 
 @app.get("/")
@@ -60,7 +126,7 @@ def health():
 def api_gloss():
     payload = request.get_json(silent=True) or {}
     text = str(payload.get("text", "")).strip()
-    result = english_to_isl_gloss(text)
+    result = english_to_isl_gloss_hybrid(text)
     return jsonify(result.to_dict())
 
 
@@ -71,19 +137,18 @@ def api_sequence():
     if not isinstance(tokens_in, list):
         return jsonify({"error": "gloss_tokens must be a list"}), 400
 
-    tokens = [str(t).strip().upper() for t in tokens_in if str(t).strip()]
-    missing: list[str] = []
-    urls: list[str] = []
+    tokens_raw = [str(t).strip().upper() for t in tokens_in if str(t).strip()]
+    expanded_tokens, missing = _expand_tokens_with_fingerspelling(tokens_raw)
 
-    for token in tokens:
-        asset = GLOSS_TO_ASSET.get(token)
-        if not asset:
-            missing.append(token)
-            continue
-        # URL-encode filename (handles spaces like "Thank You.mp4")
-        urls.append(f"/videos/{quote(asset)}")
+    urls = _tokens_to_video_urls(expanded_tokens)
 
-    return jsonify({"gloss_tokens": tokens, "video_urls": urls, "missing": missing})
+    return jsonify(
+        {
+            "gloss_tokens": tokens_raw,
+            "video_urls": urls,
+            "missing": missing,
+        }
+    )
 
 
 @app.post("/api/publish")
@@ -104,7 +169,7 @@ def api_publish():
     tokens_in = payload.get("gloss_tokens") or []
 
     if transcript and not tokens_in:
-        gloss_result = english_to_isl_gloss(transcript)
+        gloss_result = english_to_isl_gloss_hybrid(transcript)
         tokens = gloss_result.gloss_tokens
         gloss_meta = gloss_result.to_dict().get("meta", {})
     else:
@@ -113,14 +178,9 @@ def api_publish():
         tokens = [str(t).strip().upper() for t in tokens_in if str(t).strip()]
         gloss_meta = {"rules_applied": ["ExternalPublish"], "confidence": 1.0}
 
-    missing: list[str] = []
-    urls: list[str] = []
-    for token in tokens:
-        asset = GLOSS_TO_ASSET.get(token)
-        if not asset:
-            missing.append(token)
-            continue
-        urls.append(f"/videos/{quote(asset)}")
+    expanded_tokens, missing = _expand_tokens_with_fingerspelling(tokens)
+
+    urls = _tokens_to_video_urls(expanded_tokens)
 
     event_id = int(LATEST_EVENT.get("id", 0)) + 1
     LATEST_EVENT = {
@@ -137,6 +197,24 @@ def api_publish():
 @app.get("/api/latest")
 def api_latest():
     return jsonify(LATEST_EVENT)
+
+
+@app.get("/api/asr_control")
+def api_asr_control_get():
+    """Return current ASR control state."""
+    return jsonify(ASR_CONTROL)
+
+
+@app.post("/api/asr_control")
+def api_asr_control_set():
+    """Update ASR control state (e.g. {"state": "stopped"})."""
+    global ASR_CONTROL
+    payload = request.get_json(silent=True) or {}
+    state = str(payload.get("state", "")).strip().lower()
+    if state not in {"running", "stopped"}:
+        return jsonify({"error": "state must be 'running' or 'stopped'"}), 400
+    ASR_CONTROL = {"state": state}
+    return jsonify(ASR_CONTROL)
 
 
 @app.get("/videos/<path:filename>")

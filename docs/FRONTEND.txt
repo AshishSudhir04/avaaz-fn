@@ -1,0 +1,218 @@
+================================================================================
+  AVAAZ – FRONTEND – CODE EXPLAINED (BEGINNER-FRIENDLY)
+================================================================================
+
+This file explains the frontend (web UI) of the project: a single HTML page
+that lets you type English or gloss, call the backend APIs to get gloss or
+video URLs, and play sign videos. It also has a "Live" mode that polls the
+server for new events (from the ASR) and auto-plays the corresponding videos.
+
+--------------------------------------------------------------------------------
+WHICH FILES BELONG TO THE FRONTEND?
+--------------------------------------------------------------------------------
+
+  • web_static/index.html   – The only frontend file. It contains:
+      - HTML: structure (header, textareas, buttons, video element, output area).
+      - CSS: embedded in a <style> block (dark theme, layout, buttons).
+      - JavaScript: embedded in a <script> block. It handles clicks, calls
+        /api/gloss, /api/sequence, /api/latest, and plays videos in sequence.
+
+  The web app (web_app.py) serves this file at the route "/". There are no
+  separate JS or CSS files; everything is in one HTML file.
+
+--------------------------------------------------------------------------------
+WHAT THE FRONTEND DOES IN PLAIN ENGLISH
+--------------------------------------------------------------------------------
+
+  1. "Gloss + Play" – You type English in the first textarea. When you click,
+     the page sends that text to POST /api/gloss, gets back gloss tokens,
+     fills the gloss textarea with them, then sends those tokens to POST
+     /api/sequence to get video URLs, and plays those videos one by one.
+
+  2. "Play Gloss" – You type or paste gloss tokens (e.g. "YOUR NAME WHAT") in
+     the second textarea. When you click, the page sends those tokens to
+     POST /api/sequence and plays the returned video URLs.
+
+  3. "Live: Start" – The page starts polling GET /api/latest every 700 ms.
+     When the server has a new "event" (new id), it means the ASR has just
+     sent a new transcript and gloss via POST /api/publish. The page then
+     updates the English and gloss textareas, and auto-plays the video URLs
+     from that event. So you speak into the mic (with asr_simple.py running),
+     and the page shows the result and plays the signs.
+
+  4. "Stop" – Clears the video queue and stops playback.
+
+  5. On load, it also calls GET /health once and logs the result in the
+     output area (so you can see if the server and video dir are OK).
+
+--------------------------------------------------------------------------------
+CODE WALKTHROUGH – web_static/index.html
+--------------------------------------------------------------------------------
+
+--- HTML STRUCTURE ---
+
+  <head>
+    - Meta charset and viewport.
+    - Title: "Avaaz – Gloss → Video Player".
+    - One big <style> block (see CSS section below).
+
+  <body>
+    - <header>: "Avaaz" title, subtitle, and a status pill (id="status")
+      that shows "Idle", "Glossing…", "Playing…", "Live polling…", etc.
+
+    - <main>: two sections (cards).
+      - Left card:
+        - Textarea id="english" – for English text (optional).
+        - Textarea id="gloss" – for gloss tokens (space-separated).
+        - Buttons: "Gloss + Play" (id="btnGlossPlay"), "Play Gloss"
+          (id="btnPlay"), "Live: Start" (id="btnLive"), "Stop" (id="btnStop").
+      - Right card:
+        - <video id="player" controls> – the sign video player.
+        - <pre id="out"> – scrollable output for logs (API responses,
+          errors, health check).
+
+  So: two input areas, four buttons, one video, one log area.
+
+--- CSS (STYLE) ---
+
+  - :root { color-scheme: dark } – prefer dark theme.
+  - body: dark background (#050816), light text, system font.
+  - header: flex, padding, border-bottom.
+  - main: grid with two columns (1.2fr and 0.8fr), gap; on small screens
+    it becomes one column (@media max-width: 900px).
+  - .card: bordered, rounded, dark semi-transparent background.
+  - label: small, gray.
+  - input/textarea: full width, dark background, rounded, light text.
+  - button: rounded pill, gradient (primary) or secondary (outline).
+  - pre: for the log, wrap and break words.
+  - video: full width, rounded, dark background.
+  - .pill: for the status badge.
+
+  No external stylesheet; everything is in this file.
+
+--- JAVASCRIPT – ELEMENTS AND STATE ---
+
+  - References to DOM elements: statusEl, englishEl, glossEl, outEl, player,
+    btnGlossPlay, btnPlay, btnLive, btnStop.
+
+  - State variables:
+    - queue = array of video URLs to play.
+    - queueIdx = index of the current video in the queue.
+    - liveTimer = setInterval id when Live mode is on (or null when off).
+    - lastEventId = id of the last event we got from /api/latest (so we only
+      react when the id changes, meaning "new" event).
+
+--- setStatus(s) ---
+
+  Sets the status pill text (e.g. "Playing…", "Live polling…"). So the user
+  always sees what the app is doing.
+
+--- log(obj) ---
+
+  Appends a string or JSON string of obj to the <pre id="out">, with a
+  newline, so the newest message appears at the top. Used for API responses
+  and errors.
+
+--- tokenizeGloss(s) ---
+
+  Takes the string from the gloss textarea (e.g. "YOUR NAME WHAT"), splits
+  on whitespace, trims, removes empty parts, and uppercases each token.
+  Returns an array like ["YOUR", "NAME", "WHAT"]. Used by "Play Gloss" and
+  by "Gloss + Play" after getting tokens from /api/gloss.
+
+--- fetchGloss(text) ---
+
+  Sends POST /api/gloss with body { text }. Returns the JSON response (object
+  with gloss_tokens, meta, etc.). Throws if the response is not OK.
+
+--- fetchSequence(glossTokens) ---
+
+  Sends POST /api/sequence with body { gloss_tokens: glossTokens }. Returns
+  the JSON response (video_urls, missing, gloss_tokens). Throws if not OK.
+
+--- fetchLatest() ---
+
+  Sends GET /api/latest. Returns the JSON object (latest event: id,
+  transcript, gloss_tokens, video_urls, missing, etc.).
+
+--- playQueue(urls) ---
+
+  Sets queue = urls, queueIdx = 0. If urls is empty, sets status to "No
+  videos". Otherwise sets status to "Playing…", sets player.src to the
+  first URL, and calls player.play(). The rest of the playback is driven
+  by the "ended" event on the video (see below).
+
+--- player "ended" listener ---
+
+  When the current video finishes playing: increment queueIdx. If we have
+  more URLs, set player.src to the next one and play again. If we have
+  finished all, set status to "Done".
+
+  So "play queue" means: play first video → on end, play next → … → done.
+
+--- btnStop click ---
+
+  Clears queue and queueIdx, pauses the player, removes src, loads nothing,
+  sets status to "Stopped". So it stops playback immediately.
+
+--- btnLive click ---
+
+  Toggle for Live mode.
+  - If liveTimer is already set: clear the interval, set liveTimer = null,
+    set button text back to "Live: Start", status "Live stopped".
+  - If liveTimer is null: set button text to "Live: Stop", status "Live
+    polling…", and start setInterval every 700 ms:
+      - Call fetchLatest().
+      - If latest.id is 0 or same as lastEventId, do nothing (no new event).
+      - Otherwise set lastEventId = latest.id, update english and gloss
+        textareas from latest.transcript and latest.gloss_tokens, log the
+        event, and if there are missing tokens log a warning. Then
+        playQueue(latest.video_urls). So when ASR publishes a new result,
+        the page shows it and plays the sign videos automatically.
+
+--- btnPlay click ---
+
+  "Play Gloss" button. Gets gloss tokens from the gloss textarea via
+  tokenizeGloss(glossEl.value). Calls fetchSequence(glossTokens), logs the
+  response, logs missing tokens if any, then playQueue(seq.video_urls). So
+  it only needs gloss tokens; it does not call /api/gloss.
+
+--- btnGlossPlay click ---
+
+  "Gloss + Play" button. If English textarea is empty, logs a message and
+  returns. Otherwise: sets status "Glossing…", calls fetchGloss(englishEl.value),
+  logs the result, fills the gloss textarea with gloss.gloss_tokens joined
+  by space, sets status "Mapping…", calls fetchSequence with those tokens,
+  logs and handles missing, then playQueue(seq.video_urls). So: English →
+  /api/gloss → gloss tokens → /api/sequence → play videos.
+
+--- Page load ---
+
+  fetch("/health").then(r => r.json()).then(j => log({ health: j })). So on
+  load we see once whether the server is up and what video_dir / lexicon
+  look like.
+
+--------------------------------------------------------------------------------
+APIS THE FRONTEND USES
+--------------------------------------------------------------------------------
+
+  • POST /api/gloss   – body: { text }. response: { gloss_tokens, meta }.
+  • POST /api/sequence – body: { gloss_tokens }. response: { video_urls, missing, gloss_tokens }.
+  • GET  /api/latest  – response: latest event { id, transcript, gloss_tokens, video_urls, missing, ... }.
+  • GET  /health      – response: { ok, video_dir, video_dir_exists, lexicon_entries }.
+
+  The frontend does not serve videos; it only uses URLs returned by
+  /api/sequence or /api/latest (e.g. /videos/Hello.mp4). The browser
+  requests those URLs from the same server (web_app.py), which serves the
+  files from the video directory.
+
+--------------------------------------------------------------------------------
+SUMMARY
+--------------------------------------------------------------------------------
+
+  Frontend = one file (web_static/index.html): HTML + CSS + JS. It lets the
+  user (1) type English and get gloss + videos (Gloss + Play), (2) type gloss
+  and get videos (Play Gloss), (3) use Live mode to show and play whatever
+  the ASR just sent via /api/publish (polling /api/latest). All network
+  communication is with the same origin (the Flask app); the only "backend"
+  the frontend talks to is web_app.py.

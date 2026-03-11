@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+"""
+Rule-based + ML-assisted glossing module.
+
+This file is intentionally small and readable:
+- `normalize(...)` cleans raw English text
+- rule functions (prefixed `_rule_...`) handle frequent sentence patterns
+- `english_to_isl_gloss(...)` applies rules first, then a lexical fallback
+- `english_to_isl_gloss_hybrid(...)` optionally upgrades low-confidence output using ML
+"""
+
+from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 
 
@@ -73,6 +83,25 @@ LEXICON: Dict[str, str] = {
     "thanks": "THANK_YOU",
     "bye": "BYE",
     "welcome": "WELCOME",
+}
+
+# Very small, hand-written \"lemmatizer\" for our intro/small-talk domain.
+# This lets rules match forms like \"lives\", \"studying\" or \"working\"
+# without needing a full NLP library.
+LEMMA_MAP: Dict[str, str] = {
+    # verbs
+    "lives": "live",
+    "living": "live",
+    "studies": "study",
+    "studying": "study",
+    "worked": "work",
+    "working": "work",
+    "comes": "come",
+    "coming": "come",
+    "goes": "go",
+    "going": "go",
+    # nouns / others
+    "years": "year",
 }
 
 
@@ -205,6 +234,21 @@ def _rule_feeling_statement(tokens: List[str]) -> Tuple[List[str] | None, float]
     return None, 0.0
 
 
+RULE_PIPELINE: List[Tuple[str, Any]] = [
+    ("RuleGreetingHowAreYou", _rule_greeting_how_are_you),
+    ("RuleHowAreYou", _rule_how_are_you),
+    ("RuleThankYou", _rule_thank_you),
+    ("RuleBye", _rule_bye),
+    ("RuleGreeting", _rule_greeting),
+    ("RuleFeelingStatement", _rule_feeling_statement),
+    ("RuleNameQuestion", _rule_name_question),
+    ("RuleNameStatement", _rule_name_statement),
+    ("RuleWhereLiveQuestion", _rule_where_live_question),
+    ("RuleWhereLiveStatement", _rule_where_live_statement),
+    ("RuleAge", _rule_age),
+]
+
+
 def english_to_isl_gloss(text: str) -> GlossResult:
     """
     Main entrypoint: convert English text into ISL-style gloss tokens
@@ -217,19 +261,7 @@ def english_to_isl_gloss(text: str) -> GlossResult:
     rules_applied: List[str] = []
 
     # Ordered rule application
-    for rule_id, fn in [
-        ("RuleGreetingHowAreYou", _rule_greeting_how_are_you),
-        ("RuleHowAreYou", _rule_how_are_you),
-        ("RuleThankYou", _rule_thank_you),
-        ("RuleBye", _rule_bye),
-        ("RuleGreeting", _rule_greeting),
-        ("RuleFeelingStatement", _rule_feeling_statement),
-        ("RuleNameQuestion", _rule_name_question),
-        ("RuleNameStatement", _rule_name_statement),
-        ("RuleWhereLiveQuestion", _rule_where_live_question),
-        ("RuleWhereLiveStatement", _rule_where_live_statement),
-        ("RuleAge", _rule_age),
-    ]:
+    for rule_id, fn in RULE_PIPELINE:
         gloss, conf = fn(tokens)
         if gloss is not None:
             rules_applied.append(rule_id)
@@ -247,7 +279,7 @@ def english_to_isl_gloss_ml(text: str) -> GlossResult:
     We adapt its output into our GlossResult format.
     """
     # Lazy import so rule-based gloss works without ML deps installed.
-    from ml_gloss import english_to_asl_gloss_ml  # type: ignore[import]
+    from nlp.ml_gloss import english_to_asl_gloss_ml  # type: ignore[import]
 
     ml_result = english_to_asl_gloss_ml(text)
     tokens = [t.strip().upper() for t in ml_result.gloss.split() if t.strip()]
@@ -255,6 +287,41 @@ def english_to_isl_gloss_ml(text: str) -> GlossResult:
         gloss_tokens=tokens,
         rules_applied=["ML_T5_ENGLISH_TO_ASL_GLOSS"],
         confidence=0.8,
+    )
+
+
+def english_to_isl_gloss_hybrid(text: str, rule_conf_threshold: float = 0.5) -> GlossResult:
+    """
+    Hybrid gloss engine:
+
+    1. Run the rule-based system first (english_to_isl_gloss).
+       - If it fires a non-fallback rule with reasonably high confidence,
+         trust that result and return it.
+    2. Otherwise, try the ML-based gloss engine (english_to_isl_gloss_ml).
+       - If ML succeeds, return its result (tagged as hybrid/ML-origin).
+       - If ML is unavailable or fails, fall back to the rule-based result.
+    """
+    rb = english_to_isl_gloss(text)
+
+    # If rules fired (not just the linear fallback) and confidence is high enough,
+    # prefer the interpretable rule-based result.
+    if rb.gloss_tokens and rb.rules_applied:
+        primary_rule = rb.rules_applied[0]
+        if primary_rule != "RuleFallbackLinear" and rb.confidence >= rule_conf_threshold:
+            return rb
+
+    # At this point, either we hit the fallback or confidence is low: try ML.
+    try:
+        ml = english_to_isl_gloss_ml(text)
+    except Exception:
+        # ML path not available or failed – stick with rule-based output.
+        return rb
+
+    # Prefer ML tokens, but keep provenance information.
+    return GlossResult(
+        gloss_tokens=ml.gloss_tokens,
+        rules_applied=["Hybrid_UseML"] + ml.rules_applied + rb.rules_applied,
+        confidence=ml.confidence,
     )
 
 def normalize(text: str) -> List[str]:
@@ -266,6 +333,24 @@ def normalize(text: str) -> List[str]:
         return []
 
     s = text.strip().lower()
+
+    # Expand a few common contractions so rules see canonical forms.
+    # This is intentionally tiny and focused on our domain.
+    contractions = {
+        "what's": "what is",
+        "whats": "what is",
+        "i'm": "i am",
+        "you're": "you are",
+        "they're": "they are",
+        "it's": "it is",
+        "don't": "do not",
+        "doesn't": "does not",
+        "didn't": "did not",
+        "can't": "cannot",
+        "won't": "will not",
+    }
+    for src, tgt in contractions.items():
+        s = s.replace(src, tgt)
     for ch in "?!.;,:":
         s = s.replace(ch, " ")
 
@@ -295,6 +380,8 @@ def normalize(text: str) -> List[str]:
     tokens: List[str] = []
     last: str | None = None
     for t in raw_tokens:
+        # Lightweight lemmatization for a few common variants
+        t = LEMMA_MAP.get(t, t)
         if t in stopwords:
             continue
         # Remove obvious duplicates from ASR like "name name"

@@ -1,0 +1,239 @@
+================================================================================
+  AVAAZ – ASR (AUTOMATIC SPEECH RECOGNITION) – CODE EXPLAINED (BEGINNER-FRIENDLY)
+================================================================================
+
+This file explains the ASR (speech-to-text) part of the project: how the code
+listens to your microphone, detects when you stop speaking, turns that audio
+into English text, then runs glossing and (optionally) sends the result to the
+web app so the browser can play sign videos.
+
+--------------------------------------------------------------------------------
+WHICH FILES BELONG TO ASR?
+--------------------------------------------------------------------------------
+
+  • asr_simple.py   – Main ASR script used for the web flow (mic → text → gloss
+                      → POST to web app). This is the one you run when you want
+                      "speak and see sign videos in the browser."
+
+  • asr.py         – Simpler standalone script: mic → text → gloss, prints
+                      in the terminal only. Does NOT talk to the web app.
+                      Optional; not needed for the web speech-to-sign flow.
+
+This document focuses on asr_simple.py because that is what connects speech
+to the web frontend.
+
+--------------------------------------------------------------------------------
+WHAT ASR DOES IN PLAIN ENGLISH
+--------------------------------------------------------------------------------
+
+  1. Opens your microphone and reads audio in small chunks (e.g. every 0.2 s).
+  2. For each chunk, decides: "Is this speech or silence?"
+  3. When it sees enough silence after speech (e.g. ~0.8 s), it assumes you
+     finished a sentence. It takes all the audio since you started speaking
+     and runs speech-to-text on it (Whisper or Google).
+  4. It turns the resulting English text into ISL gloss tokens using the NLP
+     module (nlp_gloss.english_to_isl_gloss).
+  5. It prints the transcript and gloss in the terminal and, if publishing is
+     on, sends them to the web app (POST /api/publish). The web app then
+     maps gloss tokens to videos and stores the result; the frontend in
+     "Live" mode fetches it and plays the sign videos.
+
+--------------------------------------------------------------------------------
+CODE WALKTHROUGH – asr_simple.py
+--------------------------------------------------------------------------------
+
+--- IMPORTS AND CONFIG ---
+
+  • argparse, json, os, sys, threading, queue, Request, urlopen
+    Used for: command-line options, JSON for the publish payload, and
+    sending HTTP POST to the web app in a background thread.
+
+  • numpy (np)
+    Used for: holding audio as arrays of numbers (float or int16).
+
+  • sounddevice (sd)
+    Used for: reading from the microphone in real time. It gives you chunks
+    of audio (e.g. 200 ms at a time) in a callback.
+
+  • webrtcvad
+    Used for: Voice Activity Detection (VAD). It looks at small frames of
+    audio (e.g. 20 ms) and says "this frame is speech" or "this frame is
+    silence." We use that to know when you started and stopped talking.
+
+  • faster_whisper (WhisperModel)
+    Used for: turning a chunk of audio into English text. Runs on CPU with
+    a "small" model in int8 for speed.
+
+  • nlp_gloss.english_to_isl_gloss
+    Used for: converting the transcript (a string) into a list of ISL gloss
+    tokens (e.g. ["YOU", "NAME", "WHAT"]).
+
+  Constants:
+    SAMPLE_RATE = 16000
+      Microphone and Whisper use 16 kHz. All audio is in this rate.
+
+    BLOCK_SECONDS = 0.2
+      We get audio from the mic every 0.2 seconds (200 ms). Smaller blocks
+      let us react quickly to silence.
+
+    BLOCK_FRAMES = SAMPLE_RATE * BLOCK_SECONDS
+      Number of samples per block (e.g. 3200 samples per 0.2 s).
+
+    VAD_FRAME_MS = 20, VAD_FRAME_SAMPLES = ...
+      WebRTC VAD expects 10, 20, or 30 ms frames. We use 20 ms. The code
+      converts each block into 20 ms frames and counts how many are "speech."
+
+    SILENCE_BLOCKS_THRESHOLD = 4
+      After 4 blocks of mostly silence (4 × 0.2 s = 0.8 s), we decide
+      "the user stopped speaking" and run transcription on the buffered audio.
+
+    SPEECH_RATIO_THRESHOLD = 0.25
+      If at least 25% of the 20 ms frames in a block are marked as speech,
+      we treat the whole block as "speech" and keep adding to the buffer.
+
+    MAX_UTTERANCE_SECONDS = 30
+      We never keep more than 30 seconds of audio in the buffer (so the
+      script does not use unbounded memory).
+
+--- _block_speech_ratio(audio_float, vad) ---
+
+  What it does:
+    Takes one block of audio (float values roughly -1 to 1) and a VAD
+    object. Converts the block to 16-bit integers (what VAD expects), splits
+    it into 20 ms frames, and asks VAD for each frame: speech or not?
+    Returns the fraction of frames that were speech (0.0 to 1.0).
+
+  Why:
+    So we can say "this block was mostly speech" (ratio >= 0.25) or
+    "this block was mostly silence" (ratio < 0.25).
+
+--- _float_audio_to_pcm16_bytes(audio_float) ---
+
+  What it does:
+    Converts a float32 array (range -1 to 1) to 16-bit PCM bytes. Used when
+    we send audio to Google's API (SpeechRecognition), which expects raw
+    PCM bytes.
+
+--- _google_stt_transcribe(full_audio_float, language) ---
+
+  What it does:
+    If you run with --stt google, this function is used instead of Whisper.
+    It converts the float audio to bytes, wraps it in SpeechRecognition's
+    AudioData (sample rate 16000, 2 bytes per sample), then calls
+    recognize_google(). Returns the transcript string, or "" if nothing
+    was recognized (e.g. UnknownValueError).
+
+  Note:
+    Google STT needs internet. If the network fails, the callback can throw;
+    the rest of the ASR code does not catch that here (you may see errors in
+    the terminal). Whisper runs fully offline.
+
+--- _publisher_worker(q, webapp_url) ---
+
+  What it does:
+    Runs in a background thread. Loops forever: take an item from the
+    queue q. If the item is None, exit. Otherwise, POST the item as JSON
+    to webapp_url/api/publish (e.g. {"transcript": "...", "gloss_tokens":
+    ["HELLO","HOW","YOU"]}). If the request fails (e.g. web app not running),
+    it ignores the error so the ASR process does not crash.
+
+  Why a queue and a thread?
+    The microphone callback runs in a real-time audio thread. Doing a slow
+    HTTP request inside that callback could cause glitches or buffer
+    underruns. So we only put the result into a queue; a separate thread
+    does the HTTP POST.
+
+--- _parse_args(argv) ---
+
+  What it does:
+    Parses command-line arguments: --webapp-url, --no-publish, --stt
+    (whisper or google), --language. Uses parse_known_args so extra
+    flags (e.g. --mic) are ignored and do not cause errors.
+
+--- main() ---
+
+  1. Parse args (webapp URL, whether to publish, whisper vs google, language).
+
+  2. If --stt whisper: load WhisperModel("small", device="cpu", compute_type=
+     "int8"). If --stt google: no model load; we only print that we use
+     Google.
+
+  3. Create webrtcvad.Vad(2). The number 2 is aggressiveness (0–3); 2 is
+     a middle setting (filters more noise than 0, less aggressive than 3).
+
+  4. If publishing is enabled: create a queue (max 5 items) and start
+     _publisher_worker in a daemon thread. Print the publish URL.
+
+  5. buffer = list of audio chunks (numpy arrays). silence_blocks = counter
+     for how many consecutive "silent" blocks we have seen.
+
+  6. Define callback(indata, frames, time_info, status):
+       • If status is set, print it (e.g. overflow).
+       • Take the first channel: audio = indata[:, 0].copy().
+       • ratio = _block_speech_ratio(audio, vad).
+
+       • If ratio >= SPEECH_RATIO_THRESHOLD (we heard speech):
+           - Append this chunk to buffer.
+           - Reset silence_blocks to 0.
+           - If total buffered samples exceed MAX_UTTERANCE_SECONDS, drop
+             old chunks so we keep only the last 30 seconds.
+
+       • Else (this block is mostly silence):
+           - If buffer is not empty, increment silence_blocks.
+           - If silence_blocks >= SILENCE_BLOCKS_THRESHOLD (e.g. 4):
+             We treat this as "user stopped speaking."
+             - Concatenate all chunks in buffer into one array (full_audio).
+             - Clear buffer and reset silence_blocks.
+
+             - If using Whisper: model.transcribe(full_audio, language=...,
+               beam_size=5, vad_filter=True). Collect segment texts into
+               transcript.
+             - If using Google: _google_stt_transcribe(full_audio, language).
+
+             - If transcript is empty, return (nothing to do).
+
+             - Print "> ASR :" and the transcript.
+             - gloss_result = english_to_isl_gloss(transcript).
+             - Print "  GLOSS (ISL rules):" and the gloss tokens.
+
+             - If we have a publisher queue, put {"transcript": transcript,
+               "gloss_tokens": gloss_result.gloss_tokens} on the queue (or
+               skip if queue is full).
+
+  7. Open the microphone stream with sd.InputStream(..., callback=callback).
+     Then run a simple loop (e.g. sd.sleep(1000)) until the user presses
+     Ctrl+C. On exit, put None on the publisher queue so the worker thread
+     can stop.
+
+--------------------------------------------------------------------------------
+HOW TO RUN ASR FOR THE WEB
+--------------------------------------------------------------------------------
+
+  • Start the web app first, e.g.:
+      PORT=8002 python web_app.py
+
+  • In another terminal:
+      python asr_simple.py --webapp-url http://127.0.0.1:8002
+
+    Or:
+      WEBAPP_URL=http://127.0.0.1:8002 python asr_simple.py
+
+  • Open http://127.0.0.1:8002 in the browser, click "Live: Start", then
+    speak. When you pause, ASR will transcribe, gloss, POST to /api/publish,
+    and the page will show the new transcript/gloss and play the sign videos.
+
+  • To use Google STT instead of Whisper (needs internet):
+      python asr_simple.py --stt google --webapp-url http://127.0.0.1:8002
+
+  • To run ASR without sending to the web app (terminal only):
+      python asr_simple.py --no-publish
+
+--------------------------------------------------------------------------------
+SUMMARY
+--------------------------------------------------------------------------------
+
+  ASR in this project = microphone → VAD (speech/silence) → buffer until
+  silence → speech-to-text (Whisper or Google) → English transcript →
+  NLP gloss (english_to_isl_gloss) → optional POST to web app (/api/publish).
+  The main file is asr_simple.py; it is the only one required for the
+  web-based speech-to-sign flow.

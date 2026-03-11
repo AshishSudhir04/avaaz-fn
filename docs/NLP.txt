@@ -1,0 +1,201 @@
+================================================================================
+  AVAAZ – NLP (GLOSSING) – CODE EXPLAINED (BEGINNER-FRIENDLY)
+================================================================================
+
+This file explains the NLP part of the project: how English text is turned
+into ISL (Indian Sign Language) "gloss" tokens. A gloss is a written label
+for a sign (e.g. HELLO, YOU, NAME). The order and choice of glosses follow
+rules that match how sign language is expressed, not always the same as
+English word order.
+
+--------------------------------------------------------------------------------
+WHICH FILES BELONG TO NLP?
+--------------------------------------------------------------------------------
+
+  • nlp_gloss.py   – The only file. It contains:
+      - A small English→gloss word list (LEXICON).
+      - A function to normalize text (lowercase, remove punctuation, drop
+        stopwords).
+      - Several "rules" that detect common phrases (e.g. "What is your name?",
+        "Thank you") and output the correct gloss sequence.
+      - A main function english_to_isl_gloss(text) that tries rules first,
+        then falls back to word-by-word lexicon lookup.
+
+  Nothing else is required for glossing. The web app and ASR both import
+  english_to_isl_gloss from this file.
+
+--------------------------------------------------------------------------------
+WHAT GLOSSING DOES IN PLAIN ENGLISH
+--------------------------------------------------------------------------------
+
+  • Input:  A sentence in English, e.g. "What is your name?"
+  • Output: A list of gloss tokens in the order used in sign language,
+            e.g. ["YOUR", "NAME", "WHAT"].
+
+  In sign language, the order is often different from English (e.g. topic
+  first, question word last). The rules in nlp_gloss.py encode that. If
+  no rule matches, the code falls back to mapping each word to a gloss
+  (using the LEXICON or just uppercasing the word).
+
+--------------------------------------------------------------------------------
+CODE WALKTHROUGH – nlp_gloss.py
+--------------------------------------------------------------------------------
+
+--- GlossResult (dataclass) ---
+
+  A small container for the result of glossing:
+    • gloss_tokens  – List of strings, e.g. ["HELLO", "HOW", "YOU"].
+    • rules_applied – Which rule (or "RuleFallbackLinear") produced this.
+    • confidence   – A number between 0 and 1 (higher = more confident).
+
+  to_dict() turns this into a dictionary so the web API can return it as
+  JSON (e.g. for /api/gloss).
+
+--- LEXICON (dictionary) ---
+
+  Maps common English words (lowercase) to their gloss form (uppercase).
+  Examples: "hello" → "HELLO", "you" → "YOU", "name" → "NAME", "thanks"
+  → "THANK_YOU". This is used in two places:
+    1. Inside rules that need to output standard glosses (e.g. YOUR, NAME).
+    2. In the fallback: for each word we do LEXICON.get(word, word.upper()),
+       so unknown words are just uppercased.
+
+--- _map_to_gloss(tokens) ---
+
+  Input:  tokens = list of English words (e.g. ["your", "name", "what"]).
+  Output: list of gloss tokens (e.g. ["YOUR", "NAME", "WHAT"]).
+
+  For each word, it looks up LEXICON; if not found, it uses the word in
+  uppercase. So the fallback is "word-by-word mapping in original order."
+
+--- normalize(text) ---
+
+  Input:  Raw English string (e.g. "What is your name?").
+  Output: List of cleaned words, with punctuation and stopwords removed.
+
+  Steps:
+    1. Strip and lowercase.
+    2. Replace punctuation (?.!.;,:) with spaces.
+    3. Split on spaces to get raw tokens.
+    4. Remove "stopwords": is, am, are, the, a, an, do, does, did, to, of,
+       and, for, in, on, at, myself, yourself. These are dropped so the
+       rules see only content words (e.g. "what your name" instead of
+       "what is your name").
+    5. Remove consecutive duplicates (e.g. "name name" → "name") to handle
+       ASR repeats.
+
+  Example: "What is your name?" → ["what", "your", "name"].
+
+--- RULE FUNCTIONS (e.g. _rule_name_question, _rule_greeting) ---
+
+  Each rule function has the form:
+    def _rule_something(tokens: List[str]) -> Tuple[List[str] | None, float]:
+      ...
+      return gloss_list, confidence   # if the rule matches
+      return None, 0.0                 # if it does not match
+
+  The code tries each rule in a fixed order. The first rule that returns
+  a non-None gloss list wins. Confidence is used for debugging or future
+  scoring; the web app does not depend on it for behavior.
+
+  Examples of what the rules do:
+
+    • _rule_greeting_how_are_you
+      "hello how are you" / "hi how are you" → ["HELLO", "HOW", "YOU"].
+
+    • _rule_how_are_you
+      "how are you" (short) → ["HOW", "YOU"].
+
+    • _rule_thank_you
+      "thank you" or "thanks" → ["THANK_YOU"].
+
+    • _rule_bye
+      "bye" or "good bye" → ["BYE"].
+
+    • _rule_greeting
+      Single word "hello" or "hi" → ["HELLO"].
+
+    • _rule_feeling_statement
+      "I am happy/sad/busy" → ["ME", "HAPPY"] or ["ME", "SAD"] or ["ME", "BUSY"].
+
+    • _rule_name_question
+      "what (is) your name" → ["YOUR", "NAME", "WHAT"].
+
+    • _rule_name_statement
+      "my name is X" or "I am X" → ["ME", "NAME", X...] (X in uppercase).
+
+    • _rule_where_live_question
+      "where do you live" → ["YOU", "LIVE", "WHERE"].
+      "where are you from" → ["YOU", "FROM", "WHERE"].
+
+    • _rule_where_live_statement
+      "I live in Kochi" → ["ME", "LIVE", "KOCHI"] (drops "in"/"at" before
+      the place).
+
+    • _rule_age
+      "I am 25 years old" → ["ME", "AGE", "25"] (extracts the number).
+
+--- english_to_isl_gloss(text) ---
+
+  This is the main entry point. Both the web app and ASR call this.
+
+  Steps:
+    1. tokens = normalize(text). If tokens is empty, return GlossResult with
+       empty gloss_tokens and rules_applied = ["RuleEmpty"].
+
+    2. Run the list of rules in this order:
+         RuleGreetingHowAreYou, RuleHowAreYou, RuleThankYou, RuleBye,
+         RuleGreeting, RuleFeelingStatement, RuleNameQuestion,
+         RuleNameStatement, RuleWhereLiveQuestion, RuleWhereLiveStatement,
+         RuleAge.
+
+    3. For each (rule_id, rule_function), call rule_function(tokens). If it
+       returns (gloss_list, confidence) with gloss_list not None, return
+       GlossResult(gloss_tokens=gloss_list, rules_applied=[rule_id],
+       confidence=confidence). So the first matching rule wins.
+
+    4. If no rule matched: use the fallback. gloss_tokens = _map_to_gloss(tokens),
+       rules_applied = ["RuleFallbackLinear"], confidence = 0.3. Return that
+       GlossResult.
+
+  So: normalize → try rules in order → if none match, word-by-word lexicon
+  mapping.
+
+--- english_to_isl_gloss_ml(text) ---
+
+  Optional ML-based path. It imports ml_gloss.english_to_asl_gloss_ml(text)
+  and converts its output into our GlossResult format. Not used by the
+  default web or ASR flow; the project uses the rule-based english_to_isl_gloss.
+
+--------------------------------------------------------------------------------
+HOW THE WEB APP AND ASR USE NLP
+--------------------------------------------------------------------------------
+
+  • Web app (web_app.py):
+    - POST /api/gloss: receives {"text": "..."}, calls english_to_isl_gloss(text),
+      returns result.to_dict().
+    - POST /api/publish: if the body has "transcript" but no "gloss_tokens",
+      it calls english_to_isl_gloss(transcript) to get the tokens, then
+      maps those to video URLs.
+
+  • ASR (asr_simple.py):
+    - After getting the transcript from Whisper or Google, it calls
+      english_to_isl_gloss(transcript) to get gloss_tokens, prints them, and
+      (if publishing) sends transcript + gloss_tokens to /api/publish.
+
+  So all "English → gloss" logic lives in nlp_gloss.py; the rest of the
+  codebase only calls english_to_isl_gloss(text).
+
+--------------------------------------------------------------------------------
+SUMMARY
+--------------------------------------------------------------------------------
+
+  NLP in this project = one file (nlp_gloss.py) that:
+    1. Normalizes English (lowercase, no punctuation, no stopwords).
+    2. Tries a fixed list of phrase rules (greetings, name Q/A, where live,
+       feelings, thanks, bye, age, etc.).
+    3. If no rule matches, maps each word to a gloss via LEXICON (or
+       uppercase).
+  The main function is english_to_isl_gloss(text). It returns gloss tokens
+  and metadata; it does not know about videos. Video mapping is done in the
+  web app using isl_lexicon.json (gloss → video filename).

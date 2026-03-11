@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+Beginner-friendly ASR pipeline used by run_avaaz.sh.
+
+Flow:
+1) Read microphone audio in small chunks
+2) Detect end-of-speech using VAD
+3) Transcribe chunk (Whisper or Google STT)
+4) Convert transcript -> gloss tokens (NLP)
+5) Optionally publish event to web backend
+"""
+
 import argparse
 import json
 import os
@@ -13,7 +24,7 @@ import sounddevice as sd  # type: ignore[import]
 import webrtcvad  # type: ignore[import]
 from faster_whisper import WhisperModel  # type: ignore[import]
 
-from nlp_gloss import english_to_isl_gloss
+from nlp.nlp_gloss import english_to_isl_gloss_hybrid
 
 SAMPLE_RATE = 16000
 # Small blocks so we can detect silence quickly (every 200 ms)
@@ -104,13 +115,39 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def _transcribe_audio(
+    full_audio: np.ndarray, args: argparse.Namespace, model: WhisperModel | None
+) -> str:
+    """Transcribe one utterance using the selected STT backend."""
+    if args.stt == "whisper":
+        assert model is not None
+        segments, _ = model.transcribe(
+            full_audio,
+            language=args.language,
+            beam_size=5,
+            vad_filter=True,
+        )
+        texts = [seg.text.strip() for seg in segments if seg.text.strip()]
+        return " ".join(texts).strip()
+
+    # Google expects locale codes like en-US; map minimal cases.
+    google_lang = "en-US" if args.language.lower().startswith("en") else args.language
+    return _google_stt_transcribe(full_audio, language=google_lang)
+
+
 def main():
     args = _parse_args(sys.argv)
 
     model: WhisperModel | None = None
     if args.stt == "whisper":
-        print("Loading Whisper model (small, CPU, int8)…")
-        model = WhisperModel("small", device="cpu", compute_type="int8")
+        # Use locally downloaded faster-whisper model snapshot to avoid HF Hub calls.
+        model_path = (
+            "models/faster-whisper-small/"
+            "models--Systran--faster-whisper-small/"
+            "snapshots/536b0662742c02347bc0e980a01041f333bce120"
+        )
+        print(f"Loading Whisper model from {model_path} (small, CPU, int8)…")
+        model = WhisperModel(model_path, device="cpu", compute_type="int8")
     else:
         print("Using Google STT (SpeechRecognition / recognize_google)…")
 
@@ -160,29 +197,13 @@ def main():
                     buffer.clear()
                     silence_blocks = 0
 
-                    transcript = ""
-                    if args.stt == "whisper":
-                        assert model is not None
-                        segments, _ = model.transcribe(
-                            full_audio,
-                            language=args.language,
-                            beam_size=5,
-                            vad_filter=True,
-                        )
-                        texts = [seg.text.strip() for seg in segments if seg.text.strip()]
-                        transcript = " ".join(texts).strip()
-                    else:
-                        # Google expects locale codes like en-US; map minimal cases.
-                        google_lang = (
-                            "en-US" if args.language.lower().startswith("en") else args.language
-                        )
-                        transcript = _google_stt_transcribe(full_audio, language=google_lang)
+                    transcript = _transcribe_audio(full_audio, args, model)
 
                     if not transcript:
                         return
 
                     print("> ASR :", transcript)
-                    gloss_result = english_to_isl_gloss(transcript)
+                    gloss_result = english_to_isl_gloss_hybrid(transcript)
                     print("  GLOSS (ISL rules):", " ".join(gloss_result.gloss_tokens))
 
                     # Publish to the web app (so it can auto-play videos)

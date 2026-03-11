@@ -1,0 +1,459 @@
+================================================================================
+  AVAAZ – VIVA VOCE: POSSIBLE QUESTIONS AND ANSWERS
+  Speech-to-Indian Sign Language (ISL) – Real-Time Interpreter
+================================================================================
+
+This document lists a wide range of possible viva voce (oral exam) questions
+and suggested answers for the Avaaz project. Use it to prepare for your
+defense or presentation.
+
+--------------------------------------------------------------------------------
+SECTION 1: PROJECT OVERVIEW & AIM
+--------------------------------------------------------------------------------
+
+Q1. What is the name of your project and what does it do?
+A.  The project is called Avaaz. It is a real-time Speech-to-Indian Sign
+    Language (ISL) interpreter. It takes live speech from a microphone,
+    converts it to English text using speech recognition (ASR), converts that
+    text into ISL gloss tokens using NLP rules, maps each gloss to a sign
+    video, and displays/plays those videos in a web interface so that deaf
+    or hard-of-hearing users can understand what was said in sign language.
+
+Q2. What problem does your project solve?
+A.  Deaf and hard-of-hearing people often use Indian Sign Language (ISL),
+    while most communication is in spoken language. There is a shortage of
+    human sign language interpreters. Our system bridges this gap by
+    automatically converting spoken English into ISL signs (animated videos)
+    in near real time, so that communication can happen without a human
+    interpreter always being present.
+
+Q3. Who are the target users?
+A.  Primary users: Deaf students and professionals (e.g. 15–35 years),
+    anyone who depends on ISL for communication. Secondary users:
+    educational institutions, NGOs, healthcare facilities, and public
+    service centers that need to communicate with deaf individuals.
+
+Q4. What is the high-level pipeline of your system?
+A.  Speech (microphone) → ASR (speech-to-text) → NLP (English to ISL gloss)
+    → Video mapping (gloss to video file) → Frontend (display transcript
+    and play sign videos). So: Audio → Text → Gloss tokens → Video URLs
+    → Playback in the browser.
+
+Q5. What do you mean by "gloss" in this project?
+A.  A gloss is a written label for a sign. For example, the sign for
+    "hello" is written as the gloss HELLO. The NLP module converts
+    English sentences into a sequence of such gloss tokens (e.g. "What is
+    your name?" → YOUR NAME WHAT), which are then mapped to pre-recorded
+    sign videos and played in order.
+
+--------------------------------------------------------------------------------
+SECTION 2: ARCHITECTURE & MODULES
+--------------------------------------------------------------------------------
+
+Q6. How is the project divided into modules?
+A.  Four main parts: (1) ASR – captures microphone audio, detects speech
+    vs silence, and converts speech to text (Whisper or Google). (2) NLP –
+    converts English text to ISL gloss tokens using rules and a lexicon.
+    (3) Video mapping – backend that loads a glossary (gloss → video
+    filename), converts gloss tokens to video URLs, and serves the video
+    files. (4) Frontend – web page where the user can type text or gloss,
+    or use "Live" mode to see and play results from the ASR in real time.
+
+Q7. Which files implement which module?
+A.  ASR: asr_simple.py (and optionally asr.py for terminal-only use). NLP:
+    nlp_gloss.py. Video mapping: web_app.py (and the data file
+    isl_lexicon.json plus the video folder). Frontend: web_static/
+    index.html. The web app also uses nlp_gloss for /api/gloss and
+    /api/publish.
+
+Q8. Why is the architecture called "modular"?
+A.  Each part has a clear responsibility and can be tested or improved
+    independently. ASR only produces text; NLP only produces gloss tokens;
+    the backend only maps tokens to videos and serves them; the frontend
+    only handles UI and API calls. We can swap ASR (e.g. Whisper vs
+    Google) or add new gloss rules without changing the rest of the
+    pipeline.
+
+Q9. What is the role of the web app (web_app.py)?
+A.  It is the central server. It serves the frontend (index.html), exposes
+    APIs for glossing (/api/gloss), for converting gloss tokens to video
+    URLs (/api/sequence), for receiving results from the ASR (/api/publish),
+    and for the frontend to get the latest event (/api/latest). It also
+    serves the actual video files at /videos/<filename>. So it ties
+    together NLP, video mapping, and the UI.
+
+--------------------------------------------------------------------------------
+SECTION 3: ASR (SPEECH-TO-TEXT)
+--------------------------------------------------------------------------------
+
+Q10. What is ASR and what does it do in your project?
+A.  ASR stands for Automatic Speech Recognition. In our project it listens
+    to the microphone, detects when the user has finished speaking (using
+    silence), converts that stretch of audio into English text using
+    either Whisper or Google's API, then passes the text to the NLP
+    module to get gloss tokens, and optionally sends the result to the
+    web app so the browser can show and play the sign videos.
+
+Q11. Why do you use Voice Activity Detection (VAD)?
+A.  We need to know when the user has stopped speaking so we can send
+    a complete utterance to the speech-to-text engine. VAD looks at
+    small frames of audio (e.g. 20 ms) and labels each as "speech" or
+    "silence." When we see enough consecutive silent blocks (e.g. 0.8 s),
+    we assume the user paused and we transcribe the buffered audio. This
+    avoids transcribing in the middle of a sentence.
+
+Q12. What is the difference between Whisper and Google STT in your project?
+A.  Whisper runs locally (faster-whisper, CPU, small model). It does not
+    need the internet and keeps audio on the user's machine. Google STT
+    uses the SpeechRecognition library and recognize_google(); it is
+    free but unofficial, needs internet, and can be rate-limited. We
+    support both via a command-line option (--stt whisper or --stt google).
+
+Q13. What is the sample rate and block size used for the microphone?
+A.  Sample rate is 16000 Hz (16 kHz), which is standard for speech. We
+    read the microphone in blocks of 0.2 seconds (200 ms), so 3200
+    samples per block. Small blocks help us react quickly to silence.
+
+Q14. How does the ASR send data to the web app?
+A.  After transcribing and glossing, the ASR puts a dictionary (transcript
+    and gloss_tokens) into a queue. A background thread (publisher worker)
+    takes items from this queue and sends them to the web app via POST
+    /api/publish. We use a queue and a separate thread so that the
+    microphone callback does not block on network I/O, which could cause
+    audio glitches.
+
+Q15. What happens if the web app is not running when ASR tries to publish?
+A.  The publisher thread catches exceptions and ignores them, so the ASR
+    process does not crash. The user still sees the transcript and gloss
+    in the terminal; only the Live mode in the browser will not update
+    until the web app is running and ASR is restarted or the next
+    utterance is sent.
+
+--------------------------------------------------------------------------------
+SECTION 4: NLP & GLOSSING
+--------------------------------------------------------------------------------
+
+Q16. What does the NLP module do?
+A.  It converts English text into a list of ISL gloss tokens. For example,
+    "What is your name?" becomes ["YOUR", "NAME", "WHAT"]. It first
+    normalizes the text (lowercase, remove punctuation, remove stopwords
+    like "is", "the"), then applies a set of rules for common phrases
+    (greetings, name questions, thanks, bye, where you live, etc.). If no
+    rule matches, it falls back to mapping each word to a gloss using a
+    small lexicon (or just uppercasing the word).
+
+Q17. Why is the word order different in ISL gloss (e.g. YOUR NAME WHAT)?
+A.  Sign languages often use a different grammar from English. In many
+    sign languages, the topic or object can come first and the question
+    word last. So "What is your name?" is expressed in sign order as
+    "your name what." Our rules encode this reordering for phrases we
+    support.
+
+Q18. What is the difference between a rule and the fallback?
+A.  A rule is a pattern for a specific phrase (e.g. "thank you" →
+    THANK_YOU, "how are you" → HOW YOU). We try rules in a fixed order;
+    the first match wins. The fallback is used when no rule matches: we
+    map each word using the lexicon (or uppercase) and keep the original
+    word order. Rules give better, more accurate gloss sequences for
+    known phrases.
+
+Q19. What is the LEXICON in nlp_gloss.py?
+A.  It is a Python dictionary that maps common English words (lowercase)
+    to their gloss form (e.g. "hello" → "HELLO", "you" → "YOU", "thanks"
+    → "THANK_YOU"). It is used inside the rules and in the fallback to
+    produce standard gloss labels. It does not contain video information;
+    that is in isl_lexicon.json on the backend.
+
+Q20. What is the normalize() function used for?
+A.  It cleans the raw English string before we apply rules: lowercase,
+    replace punctuation with spaces, split into words, remove stopwords
+    (is, am, are, the, a, an, do, etc.), and remove consecutive
+    duplicates. So "What is your name?" becomes ["what", "your", "name"],
+    which the rules can match.
+
+Q21. Name a few rules your system supports.
+A.  Examples: greeting ("hello" → HELLO), "hello how are you" → HELLO HOW
+    YOU, "how are you" → HOW YOU, "thank you" / "thanks" → THANK_YOU,
+    "bye" → BYE, "what is your name" → YOUR NAME WHAT, "my name is X" →
+    ME NAME X, "where do you live" → YOU LIVE WHERE, "I live in X" →
+    ME LIVE X, "I am happy/sad/busy" → ME HAPPY/SAD/BUSY, "I am 25 years
+    old" → ME AGE 25.
+
+--------------------------------------------------------------------------------
+SECTION 5: VIDEO MAPPING & BACKEND
+--------------------------------------------------------------------------------
+
+Q22. What is video mapping?
+A.  It is the step that takes a list of ISL gloss tokens and produces a
+    list of video URLs (and a list of "missing" tokens for which no video
+    exists). The backend loads a glossary from isl_lexicon.json (gloss →
+    filename), and for each token looks up the corresponding .mp4 file,
+    then returns URLs like /videos/Hello.mp4. The same mapping is used in
+    /api/sequence and inside /api/publish.
+
+Q23. What is isl_lexicon.json and how is it used?
+A.  It is a JSON file containing an array of entries. Each entry has at
+    least "gloss" (the token name, e.g. HELLO) and "asset" (the video
+    filename, e.g. Hello.mp4). At startup, the web app reads this file
+    and builds a dictionary from gloss (uppercase) to asset. Whenever we
+    have a list of gloss tokens, we look up each token in this map to
+    get the filename and then form the URL (e.g. /videos/Hello.mp4).
+
+Q24. What is the difference between nlp_gloss.py LEXICON and isl_lexicon.json?
+A.  The LEXICON in nlp_gloss.py is for converting English words to gloss
+    *names* (e.g. "hello" → "HELLO"). It is used only in the NLP step.
+    The isl_lexicon.json file maps gloss *names* to *video filenames*
+    (e.g. "HELLO" → "Hello.mp4"). It is used only in the backend for
+    video mapping. So: English → gloss name (nlp_gloss), gloss name →
+    video file (isl_lexicon.json).
+
+Q25. What does the /api/publish endpoint do?
+A.  It receives a POST request from the ASR script. The body can contain
+    "transcript" and/or "gloss_tokens". If only transcript is sent, the
+    server runs english_to_isl_gloss(transcript) to get the tokens. Then
+    it maps each token to a video URL using the same logic as /api/sequence,
+    builds a "latest event" object (id, transcript, gloss_tokens, video_urls,
+    missing), stores it in memory, and returns it. The frontend in Live
+    mode polls /api/latest to get this event and play the videos.
+
+Q26. What does /api/sequence do?
+A.  It receives a POST with "gloss_tokens" (a list). For each token it
+    looks up the video filename in the glossary; if found, it adds the
+    corresponding /videos/... URL to the response; if not found, it adds
+    the token to "missing". It returns { gloss_tokens, video_urls,
+    missing }. The frontend uses this to play a sequence of sign videos.
+
+Q27. Where are the actual video files stored and how are they served?
+A.  They are stored in a folder (by default "INDIAN SIGN LANGUAGE
+    ANIMATED VIDEOS " in the project directory; can be overridden with
+    ISL_VIDEO_DIR). The Flask app serves them at the route /videos/
+    <filename> using send_from_directory(VIDEO_DIR, filename). So the
+    browser requests /videos/Hello.mp4 and the server sends the
+    corresponding file from that folder.
+
+--------------------------------------------------------------------------------
+SECTION 6: FRONTEND & USER INTERFACE
+--------------------------------------------------------------------------------
+
+Q28. What are the main features of the frontend?
+A.  (1) Type English and click "Gloss + Play": the page gets gloss tokens
+    from /api/gloss and video URLs from /api/sequence, then plays the
+    videos in order. (2) Type gloss tokens and click "Play Gloss": get
+    video URLs from /api/sequence and play. (3) "Live: Start": poll
+    /api/latest every 700 ms; when a new event appears (from ASR via
+    /api/publish), update the text areas and auto-play the new video
+    URLs. (4) "Stop": clear the queue and stop playback.
+
+Q29. How does Live mode work?
+A.  When the user clicks "Live: Start", the frontend starts a setInterval
+    that every 700 ms calls GET /api/latest. It compares the returned
+    "id" with the last one it saw. If the id is new, it means the ASR
+    has just published a new result. The page then updates the English
+    and gloss textareas, logs the event, and calls playQueue with the
+    video_urls from that event, so the sign videos play automatically.
+
+Q30. What APIs does the frontend call?
+A.  POST /api/gloss (body: { text }) – get gloss tokens from English.
+    POST /api/sequence (body: { gloss_tokens }) – get video_urls and
+    missing. GET /api/latest – get the latest event (for Live mode).
+    GET /health – once on load, to check server and paths. The browser
+    also requests /videos/<filename> for each video when playing.
+
+Q31. Why is the frontend a single HTML file?
+A.  For simplicity and portability. All HTML, CSS, and JavaScript are in
+    one file (web_static/index.html). There is no separate build step or
+    framework; the Flask app serves this file at "/". This is suitable
+    for an MVP and keeps the project easy to run and explain.
+
+--------------------------------------------------------------------------------
+SECTION 7: TECHNOLOGY STACK & IMPLEMENTATION
+--------------------------------------------------------------------------------
+
+Q32. What technologies did you use for the project?
+A.  Backend: Python, Flask. ASR: faster-whisper (Whisper on CPU), optional
+    SpeechRecognition for Google; sounddevice for microphone; webrtcvad
+    for VAD; numpy for audio arrays. NLP: Python only (rules + lexicon in
+    nlp_gloss.py). Frontend: HTML, CSS, JavaScript (vanilla, no framework).
+    Data: JSON (isl_lexicon.json). Videos: pre-recorded .mp4 files.
+
+Q33. Why Flask for the backend?
+A.  Flask is lightweight and easy to set up. We only need to serve one
+    HTML page, a few JSON APIs, and static video files. No database or
+    complex session handling is required for the MVP. Flask fits this
+    scope well and is beginner-friendly.
+
+Q34. Why Whisper for ASR?
+A.  Whisper gives good accuracy for English (and supports other languages),
+    can run locally so no audio is sent to the cloud, and works offline.
+    We use the "small" model with int8 on CPU to balance speed and
+    resource use. It is widely used and well documented.
+
+Q35. How do you run the full system (speech to sign in the browser)?
+A.  (1) Start the web app: e.g. PORT=8002 python web_app.py. (2) Start
+    the ASR and point it to the same server: python asr_simple.py
+    --webapp-url http://127.0.0.1:8002. (3) Open http://127.0.0.1:8002
+    in the browser, click "Live: Start", and speak. When you pause, the
+    ASR transcribes, glosses, publishes to the server, and the page
+    updates and plays the sign videos.
+
+--------------------------------------------------------------------------------
+SECTION 8: DESIGN DECISIONS & TRADE-OFFS
+--------------------------------------------------------------------------------
+
+Q36. Why rule-based glossing instead of a machine learning model?
+A.  Rules are interpretable and work well for a limited set of phrases
+    (greetings, introductions, simple questions). They do not require
+    training data or GPU. For an MVP focused on intro/small-talk
+    sentences, rule-based glossing is simpler to implement and explain.
+    We can add an ML-based gloss module later (e.g. english_to_isl_gloss_ml)
+    for more variety.
+
+Q37. Why use pre-recorded videos instead of a live-rendered avatar?
+A.  Pre-recorded clips ensure consistent, clear signs and avoid the
+    complexity of real-time 3D/2D avatar animation and timing. For an
+    MVP, mapping gloss tokens to a fixed set of videos is easier to
+    build and test. A future phase could add a 2D rigged avatar that
+    plays animations per gloss.
+
+Q38. Why poll /api/latest instead of WebSockets?
+A.  Polling is simpler to implement and debug: the frontend just calls
+    fetch("/api/latest") every 700 ms. No need for WebSocket
+    connection handling or server-side push. For low update rates (one
+    utterance every few seconds), polling is acceptable. WebSockets
+    could be added later for lower latency or higher frequency updates.
+
+Q39. Why run ASR in a separate process from the web app?
+A.  The ASR process uses the microphone and runs CPU-heavy Whisper
+    inference. Keeping it separate avoids blocking the web server and
+    lets us start/stop ASR without restarting the app. The two
+    communicate via HTTP (POST /api/publish), which is simple and
+    language-agnostic.
+
+--------------------------------------------------------------------------------
+SECTION 9: LIMITATIONS & CHALLENGES
+--------------------------------------------------------------------------------
+
+Q40. What are the main limitations of your system?
+A.  (1) Vocabulary and phrases are limited to the rules and the lexicon;
+    unknown sentences fall back to word-by-word gloss, which may not
+    match ISL grammar. (2) Not every gloss token has a video (missing
+    tokens are reported but not played). (3) Names and place names
+    (e.g. "Kochi") may not have dedicated videos unless we add them or
+    spell them with letter signs. (4) Latency depends on utterance
+    length and silence detection (e.g. 0.8 s pause). (5) Google STT
+    option needs internet and can fail or be rate-limited.
+
+Q41. How do you handle missing gloss tokens (no video)?
+A.  The backend includes a "missing" array in the response of /api/sequence
+    and in the latest event from /api/publish. The frontend can log or
+    display these so the user knows which signs were not available. We
+    do not auto-spell missing tokens as letters in the current version;
+    that could be a future improvement.
+
+Q42. What if the user speaks too long without pausing?
+A.  We cap the buffer at MAX_UTTERANCE_SECONDS (e.g. 30 seconds). Once
+    the buffer exceeds that, we drop the oldest chunks. So very long
+    monologues are truncated. In practice, for short intro phrases,
+    this is rarely hit.
+
+Q43. How do you handle different accents or noisy environments?
+A.  Whisper is reasonably robust to accents. We do not implement explicit
+    noise reduction in the current code; the microphone captures
+    whatever is in the environment. Improving robustness would require
+    either better hardware (e.g. directional mic) or signal processing
+    (e.g. noise gate, spectral filtering) in a future version.
+
+--------------------------------------------------------------------------------
+SECTION 10: TESTING, DEPLOYMENT & FUTURE WORK
+--------------------------------------------------------------------------------
+
+Q44. How would you test the system?
+A.  (1) Unit tests: test normalize() and each rule in nlp_gloss with
+    fixed inputs; test load_gloss_to_asset() and /api/sequence with
+    mock tokens. (2) Integration: run web app + ASR, speak known
+    phrases, check that transcript and gloss appear and correct
+    videos play. (3) User testing: with deaf users or ISL interpreters
+    to measure comprehension and usability.
+
+Q45. How do you add a new sign or phrase?
+A.  New sign: add a new entry to isl_lexicon.json (gloss and asset
+    filename) and add the corresponding .mp4 to the video folder. New
+    phrase: add a new rule function in nlp_gloss.py and register it in
+    the ordered list inside english_to_isl_gloss(); extend the LEXICON
+    if new words are needed.
+
+Q46. What could be improved in a future version?
+A.  (1) More phrases and rules; optional ML-based glossing. (2) Support
+    for spelling unknown words using letter videos (A–Z). (3) Streaming
+    ASR to reduce latency. (4) WebSockets or Server-Sent Events instead
+    of polling. (5) 2D/3D avatar that plays animations instead of
+    pre-recorded clips. (6) Multi-language input (e.g. Malayalam). (7)
+    Mobile app or AR glasses. (8) Reverse translation (ISL to speech).
+
+Q47. Is the system suitable for production?
+A.  As an MVP it is suitable for demos and lab use. For production we
+    would need: stronger error handling and logging, authentication if
+    needed, HTTPS, possibly a production WSGI server (e.g. Gunicorn),
+    and more comprehensive testing and accessibility review. The
+    architecture is modular so we can replace or upgrade components.
+
+--------------------------------------------------------------------------------
+SECTION 11: SHORT CONCEPTUAL QUESTIONS
+--------------------------------------------------------------------------------
+
+Q48. What is Indian Sign Language (ISL)?
+A.  Indian Sign Language is a visual-gestural language used by many deaf
+    and hard-of-hearing people in India. It has its own grammar and
+    vocabulary, different from spoken Hindi or English. Glosses are
+    written representations of signs (usually in uppercase) used for
+    notation and in systems like ours.
+
+Q49. What is a gloss token?
+A.  A gloss token is a single written label for one sign. For example,
+    HELLO, YOU, NAME, WHAT are gloss tokens. A sentence in gloss might
+    be "YOUR NAME WHAT" for "What is your name?"
+
+Q50. What is VAD (Voice Activity Detection)?
+A.  VAD is a technique that decides, for small segments of audio, whether
+    the segment contains speech or silence/noise. We use it to detect
+    when the user has started and stopped speaking so we can send a
+    complete phrase to the speech recognizer.
+
+Q51. What is the purpose of the publisher queue in ASR?
+A.  The microphone callback runs in a real-time audio thread. Sending
+    HTTP requests there could block and cause audio underruns or
+    glitches. So we put the result (transcript + gloss_tokens) into a
+    queue, and a separate thread reads from the queue and performs the
+    POST to /api/publish. This keeps the audio path responsive.
+
+Q52. What is the "latest event" in the web app?
+A.  It is a single in-memory object (LATEST_EVENT) that holds the most
+    recent result from the ASR: id, transcript, gloss_tokens, video_urls,
+    missing, etc. When the ASR calls POST /api/publish, we overwrite
+    this object. When the frontend calls GET /api/latest, we return it.
+    We do not keep history; only the last event is stored.
+
+--------------------------------------------------------------------------------
+SECTION 12: QUICK ONE-LINER ANSWERS (REVISION)
+--------------------------------------------------------------------------------
+
+Q53. What does ASR stand for? → Automatic Speech Recognition.
+Q54. What does NLP stand for here? → Natural Language Processing (we use it for glossing).
+Q55. What does ISL stand for? → Indian Sign Language.
+Q56. What does VAD stand for? → Voice Activity Detection.
+Q57. Which file runs the microphone and sends to the web app? → asr_simple.py.
+Q58. Which file converts English to gloss tokens? → nlp_gloss.py.
+Q59. Which file serves the web UI and video APIs? → web_app.py.
+Q60. Which file maps gloss to video filenames? → isl_lexicon.json (loaded by web_app.py).
+Q61. What is the main entry function for glossing? → english_to_isl_gloss(text).
+Q62. Which API does the ASR call to push new results? → POST /api/publish.
+Q63. Which API does the frontend poll in Live mode? → GET /api/latest.
+Q64. What sample rate is used for the microphone? → 16000 Hz.
+Q65. What are the two ASR options? → Whisper (local) and Google (online).
+
+--------------------------------------------------------------------------------
+END OF VIVA VOCE Q&A
+--------------------------------------------------------------------------------
+
+Use this document to practice answering out loud. Adjust answers to match
+your exact implementation and any extra features you have added.

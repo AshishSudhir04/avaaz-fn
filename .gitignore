@@ -1,11 +1,9 @@
 # Project-specific ignores (requested)
-/web_app.py
-/isl gloss.pdf
-/isl_coverage_map.md
-/web_static/
+
 /INDIAN SIGN LANGUAGE ANIMATED VIDEOS /
 /INDIAN SIGN LANGUAGE ANIMATED VIDEOS/
-/asr_simple.py
+/models/
+
 
 # Python
 __pycache__/
