@@ -23,7 +23,7 @@ BLOCK_FRAMES = int(SAMPLE_RATE * BLOCK_SECONDS)
 VAD_FRAME_MS = 20
 VAD_FRAME_SAMPLES = int(SAMPLE_RATE * VAD_FRAME_MS / 1000)
 # How many consecutive silent blocks before we consider "speaker stopped"
-SILENCE_BLOCKS_THRESHOLD = 4  # 4 * 0.2 s = 0.8 s of silence
+SILENCE_BLOCKS_THRESHOLD = 2  # 4 * 0.2 s = 0.8 s of silence
 # Min fraction of speech frames in a block to count as "speech"
 SPEECH_RATIO_THRESHOLD = 0.25
 # Max utterance length (seconds) to avoid huge buffers
@@ -229,7 +229,7 @@ def main() -> None:
             silence_block_count = 0
 
             # Cap buffer to avoid unbounded growth.
-            total_samples = sum(b.size for b in utterance_buffer)
+            total_samples = sum(b.size for b in utterance_buffer)#trim the buffer for ecent blocks
             if total_samples > SAMPLE_RATE * MAX_UTTERANCE_SECONDS:
                 utterance_buffer = utterance_buffer[
                     -int(SAMPLE_RATE * MAX_UTTERANCE_SECONDS / audio_block.size) :

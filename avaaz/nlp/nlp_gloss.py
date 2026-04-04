@@ -290,38 +290,66 @@ def english_to_isl_gloss_ml(text: str) -> GlossResult:
     )
 
 
-def english_to_isl_gloss_hybrid(text: str, rule_conf_threshold: float = 0.5) -> GlossResult:
+def _split_sentences(text: str) -> List[str]:
     """
-    Hybrid gloss engine:
+    Split text into sentences on . ? ! so we can gloss each part.
+    Prevents one matched phrase from discarding the rest of the input.
+    """
+    if not text or not text.strip():
+        return []
+    s = text.strip()
+    for sep in ".!?":
+        s = s.replace(sep, sep + "\n")
+    parts = [p.strip() for p in s.splitlines() if p.strip()]
+    return parts if parts else [text.strip()]
 
-    1. Run the rule-based system first (english_to_isl_gloss).
-       - If it fires a non-fallback rule with reasonably high confidence,
-         trust that result and return it.
-    2. Otherwise, try the ML-based gloss engine (english_to_isl_gloss_ml).
-       - If ML succeeds, return its result (tagged as hybrid/ML-origin).
-       - If ML is unavailable or fails, fall back to the rule-based result.
+
+def _english_to_isl_gloss_hybrid_single(
+    text: str, rule_conf_threshold: float = 0.5
+) -> GlossResult:
+    """
+    Single-segment hybrid (no sentence splitting). Used internally by
+    english_to_isl_gloss_hybrid when processing each segment.
     """
     rb = english_to_isl_gloss(text)
-
-    # If rules fired (not just the linear fallback) and confidence is high enough,
-    # prefer the interpretable rule-based result.
     if rb.gloss_tokens and rb.rules_applied:
         primary_rule = rb.rules_applied[0]
         if primary_rule != "RuleFallbackLinear" and rb.confidence >= rule_conf_threshold:
             return rb
-
-    # At this point, either we hit the fallback or confidence is low: try ML.
     try:
         ml = english_to_isl_gloss_ml(text)
     except Exception:
-        # ML path not available or failed – stick with rule-based output.
         return rb
-
-    # Prefer ML tokens, but keep provenance information.
     return GlossResult(
         gloss_tokens=ml.gloss_tokens,
         rules_applied=["Hybrid_UseML"] + ml.rules_applied + rb.rules_applied,
         confidence=ml.confidence,
+    )
+
+
+def english_to_isl_gloss_hybrid(text: str, rule_conf_threshold: float = 0.5) -> GlossResult:
+    """
+    Hybrid gloss engine. Splits on sentence boundaries (. ? !) and glosses
+    each part, so e.g. "Hello, how are you? My name is Ashik." yields
+    HELLO HOW YOU + ME NAME ASHIK instead of only the first phrase.
+    """
+    parts = _split_sentences(text)
+    if len(parts) <= 1:
+        return _english_to_isl_gloss_hybrid_single(text, rule_conf_threshold)
+
+    all_tokens: List[str] = []
+    all_rules: List[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        result = _english_to_isl_gloss_hybrid_single(part, rule_conf_threshold)
+        all_tokens.extend(result.gloss_tokens)
+        all_rules.extend(result.rules_applied)
+    return GlossResult(
+        gloss_tokens=all_tokens,
+        rules_applied=all_rules,
+        confidence=0.85 if all_tokens else 0.0,
     )
 
 def normalize(text: str) -> List[str]:

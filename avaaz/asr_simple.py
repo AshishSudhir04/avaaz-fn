@@ -34,9 +34,9 @@ BLOCK_FRAMES = int(SAMPLE_RATE * BLOCK_SECONDS)
 VAD_FRAME_MS = 20
 VAD_FRAME_SAMPLES = int(SAMPLE_RATE * VAD_FRAME_MS / 1000)
 # How many consecutive silent blocks before we consider "speaker stopped"
-SILENCE_BLOCKS_THRESHOLD = 4  # 4 * 0.2 s = 0.8 s of silence
+SILENCE_BLOCKS_THRESHOLD = 6  # 6 * 0.2 s = 1.2 s of silence (better context)
 # Min fraction of speech frames in a block to count as "speech"
-SPEECH_RATIO_THRESHOLD = 0.25
+SPEECH_RATIO_THRESHOLD = 0.2
 # Max utterance length (seconds) to avoid huge buffers
 MAX_UTTERANCE_SECONDS = 30
 
@@ -111,8 +111,39 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--no-publish", action="store_true", default=False)
     p.add_argument("--stt", choices=["whisper", "google"], default="whisper")
     p.add_argument("--language", default="en")
+    p.add_argument("--translate-to-english", action="store_true", default=False)
+    p.add_argument("--beam-size", type=int, default=8)
+    p.add_argument("--silence-blocks", type=int, default=SILENCE_BLOCKS_THRESHOLD)
+    p.add_argument("--speech-ratio", type=float, default=SPEECH_RATIO_THRESHOLD)
     args, _unknown = p.parse_known_args(argv[1:])
     return args
+
+
+def _is_english_language(lang: str) -> bool:
+    """Return True if a language code represents English."""
+    norm = (lang or "").strip().lower()
+    return norm in {"en", "en-us", "en-gb"} or norm.startswith("en-")
+
+
+def _translate_to_english(text: str, source_language: str) -> str:
+    """
+    Translate source text to English using deep-translator (Google Translate).
+    Install once: pip install deep-translator
+    """
+    try:
+        from deep_translator import GoogleTranslator  # type: ignore[import]
+    except Exception as e:
+        raise RuntimeError(
+            "Translation requested but deep-translator is not installed. "
+            "Install with: pip install deep-translator"
+        ) from e
+
+    # deep-translator expects simple language codes like 'ml', 'en'
+    src = source_language.split("-")[0].lower()
+    if src == "en":
+        return text
+    translated = GoogleTranslator(source=src, target="en").translate(text)
+    return translated.strip() if translated else text
 
 
 def _transcribe_audio(
@@ -124,8 +155,10 @@ def _transcribe_audio(
         segments, _ = model.transcribe(
             full_audio,
             language=args.language,
-            beam_size=5,
+            beam_size=max(1, args.beam_size),
             vad_filter=True,
+            condition_on_previous_text=True,
+            temperature=0.0,
         )
         texts = [seg.text.strip() for seg in segments if seg.text.strip()]
         return " ".join(texts).strip()
@@ -171,6 +204,11 @@ def main():
     silence_blocks = 0
 
     print("Starting microphone ASR. Speak; we transcribe when you pause (silence).")
+    print(
+        f"ASR params: beam_size={max(1, args.beam_size)}, "
+        f"silence_blocks={max(1, args.silence_blocks)}, "
+        f"speech_ratio={args.speech_ratio:.2f}"
+    )
     print("Press Ctrl+C to stop.\n")
 
     def callback(indata, frames, time_info, status):
@@ -181,7 +219,10 @@ def main():
         audio = indata[:, 0].copy()
         ratio = _block_speech_ratio(audio, vad)
 
-        if ratio >= SPEECH_RATIO_THRESHOLD:
+        speech_ratio_threshold = max(0.01, min(1.0, args.speech_ratio))
+        silence_blocks_threshold = max(1, args.silence_blocks)
+
+        if ratio >= speech_ratio_threshold:
             buffer.append(audio.copy())
             silence_blocks = 0
             # Cap buffer to avoid unbounded growth
@@ -191,7 +232,7 @@ def main():
         else:
             if buffer:
                 silence_blocks += 1
-                if silence_blocks >= SILENCE_BLOCKS_THRESHOLD:
+                if silence_blocks >= silence_blocks_threshold:
                     # Speaker stopped – transcribe accumulated audio
                     full_audio = np.concatenate(buffer)
                     buffer.clear()
@@ -202,8 +243,18 @@ def main():
                     if not transcript:
                         return
 
+                    gloss_input_text = transcript
+                    if args.translate_to_english and not _is_english_language(args.language):
+                        try:
+                            gloss_input_text = _translate_to_english(transcript, args.language)
+                        except Exception as e:
+                            print(f"[translation warning] {e}", file=sys.stderr)
+                            gloss_input_text = transcript
+
                     print("> ASR :", transcript)
-                    gloss_result = english_to_isl_gloss_hybrid(transcript)
+                    if gloss_input_text != transcript:
+                        print("> EN  :", gloss_input_text)
+                    gloss_result = english_to_isl_gloss_hybrid(gloss_input_text)
                     print("  GLOSS (ISL rules):", " ".join(gloss_result.gloss_tokens))
 
                     # Publish to the web app (so it can auto-play videos)
@@ -211,7 +262,7 @@ def main():
                         try:
                             pub_q.put_nowait(
                                 {
-                                    "transcript": transcript,
+                                    "transcript": gloss_input_text,
                                     "gloss_tokens": gloss_result.gloss_tokens,
                                 }
                             )
