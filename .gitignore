@@ -17,6 +17,16 @@ build/
 venv/
 env/
 .env
+.env.*
+!.env.example
+
+# Runtime / local test artifacts
+*.log
+*.wav
+*.mp3
+*.mp4
+*.webm
+*.tmp
 
 # OS / editor
 .DS_Store
